@@ -31,3 +31,24 @@ jobs:
         with:
           name: wecom-rpa-exe
           path: dist/*.exe
+
+  smoke-test:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: 下载打包产物
+        uses: actions/download-artifact@v4
+        with:
+          name: wecom-rpa-exe
+
+      - name: 启动 wecom-rpa.exe 冒烟测试
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath ".\wecom-rpa.exe" -PassThru
+          Start-Sleep -Seconds 20
+          if ($proc.HasExited) {
+            Write-Error "wecom-rpa.exe 在 20 秒内退出，启动崩溃"
+            exit 1
+          }
+          Write-Host "冒烟测试通过：wecom-rpa.exe 启动 20 秒后仍在运行（PID: $($proc.Id)）"
+          Stop-Process -Id $proc.Id -Force
