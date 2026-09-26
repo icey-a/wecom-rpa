@@ -36,16 +36,16 @@ jobs:
       - name: Launch WeCom, capture login QR
         shell: pwsh
         run: |
-          $exe = $null
-          foreach ($p in @("$env:ProgramFiles\Tencent\WXWork\WXWork.exe", "${env:ProgramFiles(x86)}\Tencent\WXWork\WXWork.exe")) {
-            Write-Host "检查: $p"
-            if (Test-Path $p) { $exe = $p; break }
+          $dir = "C:\Program Files (x86)\WXWork"
+          Write-Host "列出安装目录:"
+            Get-ChildItem $dir -ErrorAction SilentlyContinue | Select-Object Name
+            $exe = Join-Path $dir "WXWork.exe"
           }
-          if (-not $exe) {
-            Write-Host "直接路径没找到，列一下 Tencent 目录:"
-            Get-ChildItem "$env:ProgramFiles\Tencent" -ErrorAction SilentlyContinue | Select-Object Name
-            Get-ChildItem "${env:ProgramFiles(x86)}\Tencent" -ErrorAction SilentlyContinue | Select-Object Name
-            Write-Error "找不到 WXWork.exe"; exit 1
+          if (-not (Test-Path $exe)) { Write-Error "找不到 $exe"; exit 1 }
+            
+            
+            
+            
           }
           Write-Host "用这个启动: $exe"
           Start-Process $exe
