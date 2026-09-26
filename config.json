@@ -1,0 +1,1 @@
+{"chat_region":[100,200,600,500],"input_box":[400,800],"interval":5,"learn_examples":3,"llm_api_key":"填你的key","llm_base_url":"https://api.deepseek.com/v1","llm_model":"deepseek-chat","service_chats":[],"system_prompt":"你是共享充电宝品牌的微信客服,语气亲切简洁,一次只回答客户当前的问题。业务规则:充电宝丢失或未归还会扣费,费用为XX元(请替换成实际金额);用户说'充电宝丢了'时,先安抚,再告知扣费规则和处理方式,不要答非所问。","title_region":[100,100,300,40],"window_rect":null}

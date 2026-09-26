@@ -1,0 +1,6 @@
+pyautogui
+pillow
+paddleocr
+pyperclip
+requests
+pywin32; sys_platform == "win32"
