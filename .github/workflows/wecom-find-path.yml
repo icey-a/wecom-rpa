@@ -1,0 +1,26 @@
+name: wecom-find-path
+on:
+  workflow_dispatch:
+jobs:
+  find:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install WeCom
+        shell: pwsh
+        run: |
+          winget install -e --id Tencent.WeCom --silent --accept-package-agreements --accept-source-agreements
+      - name: Diagnose install location
+        shell: pwsh
+        run: |
+          Write-Host "=== winget list ==="
+          winget list --id Tencent.WeCom
+          Write-Host "=== Program Files roots ==="
+          Get-ChildItem "$env:ProgramFiles" -ErrorAction SilentlyContinue | Select-Object Name
+          Write-Host "=== Start Menu shortcuts ==="
+          Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu\Programs" -Filter "*WeCom*" -ErrorAction SilentlyContinue | Select-Object FullName
+          Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu\Programs" -Filter "*WXWork*" -ErrorAction SilentlyContinue | Select-Object FullName
+          Write-Host "=== Registry uninstall ==="
+          Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*WeCom*" -or $_.DisplayName -like "*WXWork*" } | Select-Object DisplayName, InstallLocation
+          Write-Host "=== Likely dirs ==="
+          foreach ($d in @("$env:ProgramFiles\WXWork", "$env:ProgramFiles\Tencent", "${env:ProgramFiles(x86)}\WXWork", "$env:LOCALAPPDATA\Tencent", "$env:LOCALAPPDATA\WXWork")) { Write-Host "$d -> $(Test-Path $d)" }
