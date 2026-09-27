@@ -1,0 +1,83 @@
+name: wecom-login-test
+on:
+  workflow_dispatch:
+
+jobs:
+  login-test:
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wecom-rpa-exe
+          run-id: 36234186936
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: exes
+
+      - name: Prepare config (dummy key for cloud test)
+        shell: pwsh
+        run: |
+          Copy-Item config.json exes/config.json
+          (Get-Content exes/config.json -Raw) -replace '"llm_api_key":"填你的key"', '"llm_api_key":"dummy-key-for-cloud-test"' | Set-Content exes/config.json
+          Select-String -Path exes/config.json -Pattern 'dummy-key-for-cloud-test'
+
+      - name: Install WeCom
+        shell: pwsh
+        run: |
+          winget install -e --id Tencent.WeCom --silent --accept-package-agreements --accept-source-agreements
+          if ($LASTEXITCODE -ne 0) { Write-Error "WeCom 安装失败"; exit 1 }
+
+      - name: Launch WeCom, capture login QR
+        shell: pwsh
+        run: |
+          $dir = "C:\Program Files (x86)\WXWork"
+          Write-Host "列出安装目录:"
+          Get-ChildItem $dir -ErrorAction SilentlyContinue | Select-Object Name
+          $exe = Join-Path $dir "WXWork.exe"
+          if (-not (Test-Path $exe)) { Write-Error "找不到 $exe"; exit 1 }
+          Write-Host "用这个启动: $exe"
+          Start-Process $exe
+          Write-Host "已启动，等待 25 秒..."
+          Start-Sleep -Seconds 25
+          Write-Host "截图..."
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen(0,0,0,0,$bmp.Size)
+          New-Item -ItemType Directory -Force -Path shots | Out-Null
+          $bmp.Save("$pwd/shots/wecom-qr.png"); $bmp.Dispose()
+          Write-Host "二维码截图已保存"
+
+      - name: Upload QR
+        uses: actions/upload-artifact@v4
+        with:
+          name: wecom-qr
+          path: shots/wecom-qr.png
+
+      - name: Wait for scan login (15 min) then run exe
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($n){ $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $m=New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g=[System.Drawing.Graphics]::FromImage($m); $g.CopyFromScreen(0,0,0,0,$m.Size); $g.Dispose(); $m.Save("$pwd/shots/$n"); $m.Dispose() }
+          $end=(Get-Date).AddMinutes(15); $i=0
+          while((Get-Date) -lt $end){ Start-Sleep -Seconds 60; $i++; Shot("wait-$i.png"); Write-Host "等待扫码中... $i/15" }
+          Write-Host "开始运行 exe 测试（90秒）"
+          $p=Start-Process -FilePath "$pwd/exes/wecom-rpa.exe" -WorkingDirectory "$pwd/exes" -PassThru
+          Start-Sleep -Seconds 30; Shot("exe-30s.png")
+          Start-Sleep -Seconds 30; Shot("exe-60s.png")
+          Start-Sleep -Seconds 30; Shot("exe-90s.png")
+          if($p.HasExited){ "exe exited code=$($p.ExitCode)" | Out-File "$pwd/shots/result.txt" } else { "exe still running after 90s" | Out-File "$pwd/shots/result.txt"; Stop-Process -Id $p.Id -Force }
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-screenshots
+          path: shots/
