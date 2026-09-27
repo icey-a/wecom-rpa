@@ -28,7 +28,7 @@ $c2 = New-Object System.Windows.Forms.Label
 $c2.Text = "客服：别急，我帮您查一下"
 $c2.Font = $font
 $c2.AutoSize = $true
-$c2.Location = New-Object System.Drawing.Point(($crx+[int]($crw*0.72)),($cry+72))
+$c2.Location = New-Object System.Drawing.Point(($crx+[int]($crw*0.62)),($cry+72))
 $f.Controls.Add($c2)
 $f.Add_Shown({ $f.Activate() })
 [void]$f.ShowDialog()
