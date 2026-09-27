@@ -1,0 +1,75 @@
+name: wecom-fake-ui-test
+on:
+  workflow_dispatch:
+
+jobs:
+  fake-ui-test:
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wecom-rpa-exe
+          run-id: 36234186936
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: exes
+
+      - name: Prepare config (dummy key for cloud test)
+        shell: pwsh
+        run: |
+          Copy-Item config.json exes/config.json
+          (Get-Content exes/config.json -Raw) -replace '"llm_api_key":"填你的key"', '"llm_api_key":"dummy-key-for-cloud-test"' | Set-Content exes/config.json
+          Select-String -Path exes/config.json -Pattern 'dummy-key-for-cloud-test'
+
+      - name: Fake WeCom window + run exe
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($n){
+            $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $m=New-Object System.Drawing.Bitmap($b.Width,$b.Height)
+            $g=[System.Drawing.Graphics]::FromImage($m)
+            $g.CopyFromScreen(0,0,0,0,$m.Size); $g.Dispose()
+            $m.Save("$pwd/shots/$n"); $m.Dispose()
+          }
+          New-Item -ItemType Directory -Force -Path shots | Out-Null
+          $cfg = Get-Content exes/config.json -Raw | ConvertFrom-Json
+          $tr = @($cfg.title_region); $cr = @($cfg.chat_region)
+          if ($tr.Count -ne 4) { $tr = @(100,100,300,40) }
+          if ($cr.Count -ne 4) { $cr = @(100,200,600,500) }
+          Write-Host "title_region=$($tr -join ',') chat_region=$($cr -join ',')"
+          $scr = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $x0 = [Math]::Max(0, [Math]::Min($tr[0],$cr[0]) - 40)
+          $y0 = [Math]::Max(0, [Math]::Min($tr[1],$cr[1]) - 40)
+          $x1 = [Math]::Min($scr.Width, [Math]::Max($tr[0]+$tr[2],$cr[0]+$cr[2]) + 40)
+          $y1 = [Math]::Min($scr.Height, [Math]::Max($tr[1]+$tr[3],$cr[1]+$cr[3]) + 40)
+          if (($x1-$x0) -lt 200 -or ($y1-$y0) -lt 200) { Write-Error "fake window too small, check config regions"; exit 1 }
+          Write-Host "fake window rect: $x0,$y0,$x1,$y1"
+          $arg = "$x0 $y0 $($x1-$x0) $($y1-$y0) $($tr[0]-$x0) $($tr[1]-$y0) $($tr[2]) $($tr[3]) $($cr[0]-$x0) $($cr[1]-$y0) $($cr[2])"
+          Write-Host "fake_wecom args: $arg"
+          $fw = Start-Process pwsh -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$pwd/fake_wecom.ps1`" $arg" -PassThru
+          Start-Sleep -Seconds 3
+          Shot("fake-window.png")
+          $p = Start-Process -FilePath "$pwd/exes/wecom-rpa.exe" -WorkingDirectory "$pwd/exes" -RedirectStandardOutput "$pwd/shots/exe.log" -PassThru
+          Start-Sleep -Seconds 35; Shot("exe-35s.png")
+          Start-Sleep -Seconds 30; Shot("exe-65s.png")
+          Start-Sleep -Seconds 30; Shot("exe-95s.png")
+          if ($p.HasExited) { "exe exited code=$($p.ExitCode)" | Out-File "$pwd/shots/result.txt" }
+          else { "exe still running after 95s" | Out-File "$pwd/shots/result.txt"; Stop-Process -Id $p.Id -Force }
+          Stop-Process -Id $fw.Id -Force -ErrorAction SilentlyContinue
+          if (Test-Path "$pwd/exes/_ocr_tmp.png") { Copy-Item "$pwd/exes/_ocr_tmp.png" "$pwd/shots/ocr-last-chat.png" }
+          Get-Content "$pwd/shots/exe.log" | Select-Object -Last 30 | ForEach-Object { Write-Host "EXELOG: $_" }
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fake-ui-screenshots
+          path: shots/
