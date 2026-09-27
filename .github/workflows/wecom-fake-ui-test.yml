@@ -40,6 +40,7 @@ jobs:
             $m.Save("$pwd/shots/$n"); $m.Dispose()
           }
           New-Item -ItemType Directory -Force -Path shots | Out-Null
+          $env:PYTHONUTF8 = "1"
           $cfg = Get-Content exes/config.json -Raw | ConvertFrom-Json
           $tr = @($cfg.title_region); $cr = @($cfg.chat_region)
           if ($tr.Count -ne 4) { $tr = @(100,100,300,40) }
@@ -57,10 +58,12 @@ jobs:
           $fw = Start-Process pwsh -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$pwd/fake_wecom.ps1`" $arg" -PassThru
           Start-Sleep -Seconds 3
           Shot("fake-window.png")
-          $p = Start-Process -FilePath "$pwd/exes/wecom-rpa.exe" -WorkingDirectory "$pwd/exes" -RedirectStandardOutput "$pwd/shots/exe.log" -PassThru
+          $p = Start-Process -FilePath "$pwd/exes/wecom-rpa.exe" -WorkingDirectory "$pwd/exes" -RedirectStandardOutput "$pwd/shots/exe.log" -RedirectStandardError "$pwd/shots/exe-err.log" -PassThru
           Start-Sleep -Seconds 35; Shot("exe-35s.png")
           Start-Sleep -Seconds 30; Shot("exe-65s.png")
           Start-Sleep -Seconds 30; Shot("exe-95s.png")
+          Write-Host "=== exe.log ==="; Get-Content "$pwd/shots/exe.log" | Select-Object -Last 30 | ForEach-Object { Write-Host "EXELOG: $_" }
+          Write-Host "=== exe-err.log ==="; Get-Content "$pwd/shots/exe-err.log" | Select-Object -Last 30 | ForEach-Object { Write-Host "EXEERR: $_" }
           if ($p.HasExited) { "exe exited code=$($p.ExitCode)" | Out-File "$pwd/shots/result.txt" }
           else { "exe still running after 95s" | Out-File "$pwd/shots/result.txt"; Stop-Process -Id $p.Id -Force }
           Stop-Process -Id $fw.Id -Force -ErrorAction SilentlyContinue
