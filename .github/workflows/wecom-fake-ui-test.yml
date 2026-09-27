@@ -62,13 +62,12 @@ jobs:
           Start-Sleep -Seconds 35; Shot("exe-35s.png")
           Start-Sleep -Seconds 30; Shot("exe-65s.png")
           Start-Sleep -Seconds 30; Shot("exe-95s.png")
-          Write-Host "=== exe.log ==="; Get-Content "$pwd/shots/exe.log" | Select-Object -Last 30 | ForEach-Object { Write-Host "EXELOG: $_" }
-          Write-Host "=== exe-err.log ==="; Get-Content "$pwd/shots/exe-err.log" | Select-Object -Last 30 | ForEach-Object { Write-Host "EXEERR: $_" }
           if ($p.HasExited) { "exe exited code=$($p.ExitCode)" | Out-File "$pwd/shots/result.txt" }
           else { "exe still running after 95s" | Out-File "$pwd/shots/result.txt"; Stop-Process -Id $p.Id -Force }
           Stop-Process -Id $fw.Id -Force -ErrorAction SilentlyContinue
           if (Test-Path "$pwd/exes/_ocr_tmp.png") { Copy-Item "$pwd/exes/_ocr_tmp.png" "$pwd/shots/ocr-last-chat.png" }
-          Get-Content "$pwd/shots/exe.log" | Select-Object -Last 30 | ForEach-Object { Write-Host "EXELOG: $_" }
+          Write-Host "=== exe.log ==="; Get-Content "$pwd/shots/exe.log" | Select-Object -Last 30 | ForEach-Object { Write-Host "EXELOG: $_" }
+          Write-Host "=== exe-err.log ==="; Get-Content "$pwd/shots/exe-err.log" | Select-Object -Last 30 | ForEach-Object { Write-Host "EXEERR: $_" }
 
       - name: Upload screenshots
         if: always()
