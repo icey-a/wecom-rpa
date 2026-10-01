@@ -59,11 +59,11 @@ jobs:
           Start-Sleep -Seconds 3
           Shot("fake-window.png")
           $p = Start-Process -FilePath "$pwd/exes/wecom-rpa.exe" -WorkingDirectory "$pwd/exes" -RedirectStandardOutput "$pwd/shots/exe.log" -RedirectStandardError "$pwd/shots/exe-err.log" -PassThru
-          Start-Sleep -Seconds 35; Shot("exe-35s.png")
-          Start-Sleep -Seconds 30; Shot("exe-65s.png")
-          Start-Sleep -Seconds 30; Shot("exe-95s.png")
+          Start-Sleep -Seconds 60; Shot("exe-60s.png")
+          Start-Sleep -Seconds 240; Shot("exe-300s.png")
+          Start-Sleep -Seconds 160; Shot("exe-460s.png")
           if ($p.HasExited) { "exe exited code=$($p.ExitCode)" | Out-File "$pwd/shots/result.txt" }
-          else { "exe still running after 95s" | Out-File "$pwd/shots/result.txt"; Stop-Process -Id $p.Id -Force }
+          else { "exe still running after 460s" | Out-File "$pwd/shots/result.txt"; Stop-Process -Id $p.Id -Force }
           Stop-Process -Id $fw.Id -Force -ErrorAction SilentlyContinue
           if (Test-Path "$pwd/exes/_ocr_tmp.png") { Copy-Item "$pwd/exes/_ocr_tmp.png" "$pwd/shots/ocr-last-chat.png" }
           Write-Host "=== exe.log ==="; Get-Content "$pwd/shots/exe.log" | Select-Object -Last 30 | ForEach-Object { Write-Host "EXELOG: $_" }
