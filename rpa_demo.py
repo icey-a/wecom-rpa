@@ -130,6 +130,8 @@ def capture_window(hwnd):
     """系统级截整个窗口(被遮挡也能截到)。返回 PIL 图片,失败抛异常。"""
     import win32gui
     import win32ui
+    from ctypes import windll
+  
     from PIL import Image
 
     left, top, right, bottom = win32gui.GetWindowRect(hwnd)
@@ -143,7 +145,7 @@ def capture_window(hwnd):
     bmp.CreateCompatibleBitmap(mfc_dc, w, h)
     save_dc.SelectObject(bmp)
     try:
-        ok = win32gui.PrintWindow(hwnd, save_dc.GetSafeHdc(), 2)  # PW_RENDERFULLCONTENT
+        ok = windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 2) # PW_RENDERFULLCONTENT;注:win32gui无PrintWindow,必须走ctypes
         if not ok:
             raise RuntimeError("PrintWindow 失败")
         info = bmp.GetInfo()
