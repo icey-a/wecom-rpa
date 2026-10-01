@@ -1,5 +1,6 @@
 pyautogui
 pillow
+numpy==1.26.4
 paddleocr==2.7.3
 paddlepaddle==2.6.2
 pyperclip
