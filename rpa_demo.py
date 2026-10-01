@@ -174,28 +174,84 @@ def crop_relative(img, wx, wy, ww, wh, region):
 
 
 # ---------------- OCR ----------------
-_ocr = None
-_ocr_tmp = _os.path.join(_base_dir(), "_ocr_tmp.png")
+_ocr = Nonedef _init_ocr():
+    """按装好的 PaddleOCR 版本初始化:3.x 优先,2.x 兜底。"""
+    from paddleocr import PaddleOCR
+    try:
+        # PaddleOCR 3.x:show_log 已移除,use_angle_cls 改名 use_textline_orientation
+        return PaddleOCR(use_textline_orientation=False, lang="ch")
+    except Exception:
+        # PaddleOCR 2.x
+        return PaddleOCR(use_angle_cls=False, lang="ch", show_log=False)
+
+
+def _ocr_predict(ocr, img_path):
+    """3.x 用 predict(),2.x 用 ocr(),统一返回可迭代的 pages。"""
+    predict = getattr(ocr, "predict", None)
+    if callable(predict):
+        return predict(img_path)
+    try:
+        return ocr.ocr(img_path, cls=False)
+    except TypeError:
+        return ocr.ocr(img_path)
+
+
+def _iter_ocr_page(page):
+    """把 2.x/3.x 的单页结果统一成 (文字, 中心x) 迭代器。"""
+    # 3.x:OCRResult(平行数组 rec_texts/rec_polys,或 .json['res'])
+    rec_texts = getattr(page, "rec_texts", None)
+    rec_polys = getattr(page, "rec_polys", None)
+    if rec_texts is None:
+        try:
+            _d = (page.json or {}).get("res", {})
+        except Exception:
+            _d = {}
+        rec_texts = _d.get("rec_texts") or []
+        rec_polys = _d.get("rec_polys") or []
+    if not isinstance(page, (list, tuple)):
+        for _t, _poly in zip(list(rec_texts), list(rec_polys or [])):
+            _t = str(_t).strip()
+            if not _t:
+                continue
+            try:
+                _xs = [float(_p[0]) for _p in _poly]
+                _cx = sum(_xs) / len(_xs)
+            except Exception:
+                continue
+            yield _t, _cx
+        return
+    # 2.x:[[box,(text,conf)],...]
+    for _line in page:
+        try:
+            _box, (_t, _conf) = _line[0], _line[1]
+            _t = str(_t).strip()
+            _xs = [float(_p[0]) for _p in _box]
+            _cx = sum(_xs) / len(_xs)
+        except Exception:
+            continue
+        if _t:
+            yield _t, _cx
 
 
 def ocr_lines(pil_img):
     """返回 [(文字, 中心x), ...],中心x 相对传入图片。"""
     global _ocr
     if _ocr is None:
-        from paddleocr import PaddleOCR
-        _ocr = PaddleOCR(use_angle_cls=False, lang="ch", show_log=False)
+        _ocr = _init_ocr()
     pil_img.save(_ocr_tmp)
-    result = _ocr.ocr(_ocr_tmp, cls=False)
+    try:
+        result = _ocr_predict(_ocr, _ocr_tmp)
+    except Exception:
+        return []
     out = []
-    for page in result:
-        if not page:
+    for page in result or []:
+        if page is None:
             continue
-        for line in page:
-            box, (text, _conf) = line[0], line[1]
-            cx = sum(p[0] for p in box) / len(box)
-            text = text.strip()
-            if text:
-                out.append((text, cx))
+        out.extend(_iter_ocr_page(page))
+    return out
+
+
+  
     return out
 
 
