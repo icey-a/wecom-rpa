@@ -23,6 +23,16 @@ import pyautogui
 
 _IS_WIN = _sys.platform == "win32"
 
+# 强制 stdout/stderr 用 UTF-8:在英文 Windows 上 stdout 被重定向到文件时,
+# 默认编码是 cp1252,中文 print 会直接抛 UnicodeEncodeError 导致闪退。
+# (控制台运行时走 WriteConsoleW 不受影响,所以之前没暴露。)
+for _s in (_sys.stdout, _sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+del _s
+
 # ================= CONFIG 默认值 =================
 CONFIG_DEFAULTS = {
     # 聊天消息区域 (左, 上, 宽, 高),calibrate.py 会自动写入
