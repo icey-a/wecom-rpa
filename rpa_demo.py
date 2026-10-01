@@ -174,7 +174,11 @@ def crop_relative(img, wx, wy, ww, wh, region):
 
 
 # ---------------- OCR ----------------
-_ocr = Nonedef _init_ocr():
+_ocr = None
+_ocr_tmp = _os.path.join(_base_dir(), "_ocr_tmp.png")
+
+
+def _init_ocr():
     """按装好的 PaddleOCR 版本初始化:3.x 优先,2.x 兜底。"""
     from paddleocr import PaddleOCR
     try:
@@ -248,10 +252,6 @@ def ocr_lines(pil_img):
         if page is None:
             continue
         out.extend(_iter_ocr_page(page))
-    return out
-
-
-  
     return out
 
 
