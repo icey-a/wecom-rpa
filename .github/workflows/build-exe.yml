@@ -1,7 +1,9 @@
 name: 打包 Windows exe
 
+
 on:
   workflow_dispatch:
+
 
 jobs:
   build:
@@ -10,27 +12,33 @@ jobs:
       - name: 取出代码
         uses: actions/checkout@v4
 
+
       - name: 安装 Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
 
       - name: 安装依赖
         run: |
           pip install -r requirements.txt
           pip install pyinstaller
 
+
       - name: 打包主程序 wecom-rpa.exe
-        run: pyinstaller --onefile --name wecom-rpa --collect-all paddleocr --collect-all paddle --collect-all pyclipper rpa_demo.py
+        run: pyinstaller --onefile --name wecom-rpa --collect-all paddleocr --collect-all paddle --collect-all pyclipper --hidden-import paddleocr.ppocr.postprocess --hidden-import paddleocr.ppocr.utils.utility --hidden-import paddleocr.ppocr.utils.network --hidden-import paddleocr.ppocr.utils.logging --hidden-import paddleocr.ppocr.utils.visual --hidden-import paddleocr.ppocr.data --hidden-import paddleocr.tools.infer.predict_system --hidden-import paddleocr.ppstructure.predict_system rpa_demo.py
+
 
       - name: 打包量坐标工具 wecom-calibrate.exe
         run: pyinstaller --onefile --name wecom-calibrate calibrate.py
+
 
       - name: 上传打包产物
         uses: actions/upload-artifact@v4
         with:
           name: wecom-rpa-exe
           path: dist/*.exe
+
 
   smoke-test:
     needs: build
@@ -40,6 +48,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wecom-rpa-exe
+
 
       - name: 启动 wecom-rpa.exe 冒烟测试
         shell: pwsh
