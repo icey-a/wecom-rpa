@@ -1,203 +1,197 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-企业微信客服 RPA Demo（v2）
-- 自动定位企业微信窗口:挪动位置自动跟随;被遮挡也能截(Windows);
-  最小化时自动暂停并提示,恢复后继续。
-- 隐私:只从 config.json 里 service_chats 列出的客服会话学习你的话术风格,
-  私人聊天一个字不进风格库;看消息和生成话术对所有会话都生效。
-- 学习:在客服会话里,把你手动回的话按气泡左右位置识别出来,攒成风格库,
-  下次生成话术时附上最近几条做范例,越用越像你。
-- 流程:发现客户新消息(排队) -> AI 生成话术 -> 弹窗确认(可改字)
-  -> 发送 -> 记录写入 replies.log。常驻控制窗可随时暂停/恢复/退出。
-"""
+"""企业微信客服 RPA v3:看客户消息 -> AI 生成话术 -> 你确认/改字 -> 点一下发送。
 
-import json as _json
-import os as _os
-import sys as _sys
+用法:
+  1. python calibrate.py   量好聊天区/标题区/输入框(存为窗口相对坐标)
+  2. 填 config.json 里的 zhipu_key(在自己电脑上填,别发给别人)
+  3. python rpa_demo.py    开始工作;控制窗可暂停/恢复/退出
+
+v3 改动:
+- 监听在后台线程跑,你确认上一条时新消息照样被抓到,排队等你处理,不丢。
+- 聊天区/标题区都存成窗口相对坐标,窗口随便挪,不用重跑校准。
+- 找窗口时选面积最大的企业微信窗口(排除登录小窗和客服助手自己)。
+- 发送用剪贴板粘贴,中文话术不断行不乱码。
+- 学习门禁:只从 service_chats 的客服会话学你的话术风格,私人聊天不记;
+  看消息和生成话术对所有会话都生效。
+"""
+import json
+import os
+import sys
 import time
-import traceback
-from datetime import datetime
+import threading
+import queue as queue_mod
+import tkinter as tk
+from tkinter import scrolledtext, messagebox
 
-import pyautogui
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from rpa_core import (title_matches, diff_lines, resolve_region, pick_best,
+                      append_example, load_examples, log_reply)
 
-_IS_WIN = _sys.platform == "win32"
+IS_WINDOWS = os.name == "nt"
 
-# 强制 stdout/stderr 用 UTF-8:在英文 Windows 上 stdout 被重定向到文件时,
-# 默认编码是 cp1252,中文 print 会直接抛 UnicodeEncodeError 导致闪退。
-# (控制台运行时走 WriteConsoleW 不受影响,所以之前没暴露。)
-for _s in (_sys.stdout, _sys.stderr):
-    try:
-        _s.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-del _s
+try:
+    from PIL import ImageGrab
+except Exception:
+    ImageGrab = None
 
-# ================= CONFIG 默认值 =================
+try:
+    import pyautogui
+    pyautogui.FAILSAFE = False
+except Exception:
+    pyautogui = None
+
+try:
+    from paddleocr import PaddleOCR
+except Exception:
+    PaddleOCR = None
+
+try:
+    import requests
+except Exception:
+    requests = None
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):  # 打包成 exe 后,配置和数据放在 exe 旁边
+    BASE = os.path.dirname(sys.executable)
+CONFIG_PATH = os.path.join(BASE, "config.json")
+DATA_DIR = os.path.join(BASE, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
 CONFIG_DEFAULTS = {
-    # 聊天消息区域 (左, 上, 宽, 高),calibrate.py 会自动写入
-    "chat_region": (100, 200, 600, 500),
-    # 会话标题栏区域 (左, 上, 宽, 高),用来识别当前是哪个会话,calibrate.py 写入
-    "title_region": (100, 100, 300, 40),
-    # 输入框位置:Windows 下是相对窗口左上角的坐标(窗口挪动自动跟随),
-    # Mac 下是绝对坐标。calibrate.py 写入。
-    "input_box": (400, 800),
-    # calibrate 时企业微信窗口的位置 [左,上,右,下],Windows 用
-    "window_rect": None,
+    # 相对坐标(推荐):[窗口内左,上,右,下],窗口移动不影响。由 calibrate.py 写入。
+    "chat_region_rel": None,
+    "title_region_rel": None,
+    # 旧版绝对坐标:没有相对坐标时兜底用,窗口移动后会偏,建议重跑 calibrate。
+    "chat_region": None,
+    "title_region": None,
+    # 输入框:窗口相对坐标 [x, y],由 calibrate.py 写入。
+    "input_rel": None,
     # 客服会话名列表:只从这些会话学习你的话术风格(私人聊天不记);
     # 看消息和生成话术对所有会话都生效,不受此限制。
     # 例: ["张三", "售后群", "充电宝咨询"]
     "service_chats": [],
-    # 生成话术时附带几条你的历史真实回复做范例
-    "learn_examples": 3,
-    # 截图间隔(秒)
-    "interval": 5,
-    # ---- 大模型(OpenAI 兼容接口) ----
-    "llm_base_url": "https://api.deepseek.com/v1",  # 智谱换成 https://open.bigmodel.cn/api/paas/v4
-    "llm_api_key": "填你的key",
-    "llm_model": "deepseek-chat",  # 智谱用 glm-4-flash
-    # ---- 业务话术 ----
-    "system_prompt": (
-        "你是共享充电宝品牌的微信客服,语气亲切简洁,一次只回答客户当前的问题。"
-        "业务规则:充电宝丢失或未归还会扣费,费用为XX元(请替换成实际金额);"
-        "用户说'充电宝丢了'时,先安抚,再告知扣费规则和处理方式,不要答非所问。"
+    "poll_interval": 3,
+    "zhipu_api": "https://open.bigmodel.cn/api/paas/v4",
+    "zhipu_model": "glm-4-flash",
+    # 在自己电脑上填,别截图发出来,也别上传网盘。
+    "zhipu_key": "",
+    "business": (
+        "你是这家店的企业微信客服,负责接待咨询充电宝租赁的客户。"
+        "说话口语、简短、热情,一次只说一两句,别列条目。"
     ),
 }
 
 
-def _base_dir():
-    if getattr(_sys, "frozen", False):
-        return _os.path.dirname(_os.path.abspath(_sys.executable))
-    return _os.path.dirname(_os.path.abspath(__file__))
-
-
-def _load_config():
+def load_config():
     cfg = dict(CONFIG_DEFAULTS)
-    path = _os.path.join(_base_dir(), "config.json")
-    if _os.path.exists(path):
+    if os.path.exists(CONFIG_PATH):
         try:
-            with open(path, encoding="utf-8") as f:
-                cfg.update(_json.load(f))
-        except Exception as e:
-            print(f"[警告] config.json 读取失败({e})，已使用默认配置。")
-    for key in ("chat_region", "title_region", "input_box"):
-        try:
-            cfg[key] = tuple(cfg[key])
+            with open(CONFIG_PATH, encoding="utf-8") as f:
+                cfg.update(json.load(f))
         except Exception:
-            print(f"[警告] {key} 格式不对，已使用默认值。")
-            cfg[key] = tuple(CONFIG_DEFAULTS[key])
-    if cfg.get("window_rect"):
-        cfg["window_rect"] = tuple(cfg["window_rect"])
-    cfg["service_chats"] = [str(s).strip() for s in cfg.get("service_chats", []) if str(s).strip()]
+            pass
     return cfg
 
 
-CONFIG = _load_config()
-# ===================================================
+CONFIG = load_config()
 
 
-# ---------------- 窗口定位与截图 ----------------
+# ---------- Windows 窗口 ----------
+
 def find_wecom_window():
-    """找企业微信窗口。返回 (hwnd, (左,上,右,下)) / "minimized" / None。Windows 才有。"""
-    if not _IS_WIN:
+    """返回企业微信主窗口 hwnd:面积最大的那个,排除登录小窗和客服助手自己。"""
+    if not IS_WINDOWS:
         return None
-    try:
-        import win32gui
-    except ImportError:
-        return None
-    found = []
-
+    import win32gui
+    cands = []  # (标题, rect, hwnd)
     def cb(hwnd, _):
-        if win32gui.IsWindowVisible(hwnd) and "企业微信" in win32gui.GetWindowText(hwnd):
-            found.append(hwnd)
-
+        try:
+            if win32gui.IsWindowVisible(hwnd):
+                cands.append((win32gui.GetWindowTitle(hwnd) or "",
+                              win32gui.GetWindowRect(hwnd), hwnd))
+        except Exception:
+            pass
     try:
         win32gui.EnumWindows(cb, None)
     except Exception:
         return None
-    if not found:
-        return None
-    hwnd = found[0]
+    i = pick_best([(t, r) for t, r, _ in cands])
+    return cands[i][2] if i is not None else None
+
+
+def is_minimized(hwnd):
     try:
-        if win32gui.IsIconic(hwnd):
-            return "minimized"
-        return (hwnd, tuple(win32gui.GetWindowRect(hwnd)))
+        import win32gui
+        return win32gui.IsIconic(hwnd)
     except Exception:
-        return None
+        return False
+
+
+def get_window_rect(hwnd):
+    import win32gui
+    return win32gui.GetWindowRect(hwnd)  # x0, y0, x1, y1
 
 
 def capture_window(hwnd):
-    """系统级截整个窗口(被遮挡也能截到)。返回 PIL 图片,失败抛异常。"""
-    import win32gui
-    import win32ui
-    from ctypes import windll
-  
-    from PIL import Image
-
-    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-    w, h = right - left, bottom - top
+    """截整个企业微信窗口(被遮挡也能截到);返回 PIL 图,原点在窗口左上角。"""
+    if not IS_WINDOWS:
+        return None
+    x0, y0, x1, y1 = get_window_rect(hwnd)
+    w, h = x1 - x0, y1 - y0
     if w <= 0 or h <= 0:
-        raise RuntimeError("窗口尺寸异常")
-    hwnd_dc = win32gui.GetWindowDC(hwnd)
-    mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
-    save_dc = mfc_dc.CreateCompatibleDC()
-    bmp = win32ui.CreateBitmap()
-    bmp.CreateCompatibleBitmap(mfc_dc, w, h)
-    save_dc.SelectObject(bmp)
+        return None
     try:
-        ok = windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 2) # PW_RENDERFULLCONTENT;注:win32gui无PrintWindow,必须走ctypes
-        if not ok:
-            raise RuntimeError("PrintWindow 失败")
+        import win32gui
+        import win32ui
+        from ctypes import windll
+        from PIL import Image
+        hwnd_dc = win32gui.GetWindowDC(hwnd)
+        mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
+        bmp = win32ui.CreateBitmap()
+        bmp.CreateCompatibleBitmap(mfc_dc, w, h)
+        save_dc.SelectObject(bmp)
+        windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 2)
         info = bmp.GetInfo()
-        data = bmp.GetBitmapBits(True)
         img = Image.frombuffer("RGB", (info["bmWidth"], info["bmHeight"]),
-                               data, "raw", "BGRX", 0, 1).copy()
-    finally:
+                               bmp.GetBitmapBits(True), "raw", "BGRX", 0, 1)
         win32gui.DeleteObject(bmp.GetHandle())
         save_dc.DeleteDC()
         mfc_dc.DeleteDC()
         win32gui.ReleaseDC(hwnd, hwnd_dc)
-    return img
+        return img
+    except Exception:
+        pass
+    try:
+        if ImageGrab is not None:
+            return ImageGrab.grab(bbox=(x0, y0, x1, y1))
+    except Exception:
+        pass
+    return None
 
 
-def crop_relative(img, wx, wy, ww, wh, region):
-    """把绝对屏幕坐标的 region,换算到窗口截图上并裁剪。"""
-    sx = img.width / ww
-    sy = img.height / wh
-    x0 = max(0, (region[0] - wx) * sx)
-    y0 = max(0, (region[1] - wy) * sy)
-    x1 = min(img.width, (region[0] + region[2] - wx) * sx)
-    y1 = min(img.height, (region[1] + region[3] - wy) * sy)
-    if x1 <= x0 or y1 <= y0:
-        raise RuntimeError("裁剪区域超出窗口范围,窗口可能被缩放过,请重跑 calibrate.py")
-    return img.crop((x0, y0, x1, y1))
-
-
-# ---------------- OCR ----------------
-_ocr = None
-_ocr_tmp = _os.path.join(_base_dir(), "_ocr_tmp.png")
-
+# ---------- OCR ----------
 
 def _init_ocr():
     """按装好的 PaddleOCR 版本初始化:3.x 优先,2.x 兜底。"""
     from paddleocr import PaddleOCR
     try:
-        # PaddleOCR 3.x:show_log 已移除,use_angle_cls 改名 use_textline_orientation
+        # PaddleOCR 3.x:show_log 已移除,use_angle_cls 改名
         return PaddleOCR(use_textline_orientation=False, lang="ch")
     except Exception:
         # PaddleOCR 2.x
         return PaddleOCR(use_angle_cls=False, lang="ch", show_log=False)
 
 
-def _ocr_predict(ocr, img_path):
+def _ocr_predict(ocr, img):
     """3.x 用 predict(),2.x 用 ocr(),统一返回可迭代的 pages。"""
     predict = getattr(ocr, "predict", None)
     if callable(predict):
-        return predict(img_path)
+        return predict(img)
     try:
-        return ocr.ocr(img_path, cls=False)
+        return ocr.ocr(img, cls=False)
     except TypeError:
-        return ocr.ocr(img_path)
+        return ocr.ocr(img)
 
 
 def _iter_ocr_page(page):
@@ -237,18 +231,15 @@ def _iter_ocr_page(page):
             yield _t, _cx
 
 
-def ocr_lines(pil_img):
-    """返回 [(文字, 中心x), ...],中心x 相对传入图片。"""
-    global _ocr
-    if _ocr is None:
-        _ocr = _init_ocr()
-    pil_img.save(_ocr_tmp)
+def ocr_lines(img, ocr):
+    if ocr is None or img is None:
+        return []
     try:
-        result = _ocr_predict(_ocr, _ocr_tmp)
+        res = _ocr_predict(ocr, img)
     except Exception:
         return []
     out = []
-    for page in result or []:
+    for page in res or []:
         if page is None:
             continue
         out.extend(_iter_ocr_page(page))
@@ -256,289 +247,290 @@ def ocr_lines(pil_img):
 
 
 def split_sides(lines, width):
-    """按左右位置分:客户气泡在左,你的在右。返回 (客户[...], 你的[...])。"""
+    """按文字中心点左右分边:左=客户,右=你自己。"""
     customer, me = [], []
-    for text, cx in lines:
-        (customer if cx < width / 2 else me).append(text)
+    for txt, cx in lines:
+        (me if cx > width / 2 else customer).append(txt)
     return customer, me
 
 
-# ---------------- 风格学习 ----------------
-def _memory_path():
-    return _os.path.join(_base_dir(), "style_memory.jsonl")
+# ---------- 话术生成 ----------
+
+def build_messages(customer_text, ctx):
+    examples = load_examples(DATA_DIR, 3)
+    demo = ""
+    if examples:
+        demo = "下面是这位客服平时自己回复的例子,学她的语气和说法:\n"
+        for e in examples:
+            demo += f"客:{e['q']}\n客服:{e['a']}\n"
+    return [
+        {"role": "system", "content": CONFIG["business"] + "\n" + demo},
+        {"role": "user",
+         "content": f"最近的对话:\n{ctx}\n客户刚说:{customer_text}\n只回一句客服话术,别解释。"},
+    ]
 
 
-def load_examples():
-    path = _memory_path()
-    if not _os.path.exists(path):
-        return []
-    out = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    out.append(_json.loads(line))
-                except Exception:
-                    pass
-    return out
+def gen_reply(customer_text, ctx):
+    key = CONFIG.get("zhipu_key", "").strip()
+    if not key or requests is None:
+        return None
+    try:
+        r = requests.post(
+            CONFIG["zhipu_api"] + "/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": CONFIG["zhipu_model"],
+                  "messages": build_messages(customer_text, ctx),
+                  "max_tokens": 200, "temperature": 0.7},
+            timeout=25,
+        )
+        d = r.json()
+        return d["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return None
 
 
-def append_example(customer, reply):
-    """记一条你的真实回复。只保留最近 300 条。"""
-    if not customer.strip() or not reply.strip():
-        return
-    exs = load_examples()
-    exs.append({"customer": customer.strip()[:200], "reply": reply.strip()[:200]})
-    exs = exs[-300:]
-    with open(_memory_path(), "w", encoding="utf-8") as f:
-        for e in exs:
-            f.write(_json.dumps(e, ensure_ascii=False) + "\n")
+# ---------- 确认窗 ----------
+
+class ConfirmWin:
+    def __init__(self, master, title, customer_text, draft):
+        self.result = None
+        self.top = tk.Toplevel(master)
+        self.top.title(f"客户[{title}]来消息了")
+        self.top.geometry("460x380")
+        self.top.attributes("-topmost", True)
+        tk.Label(self.top, text="客户说:", anchor="w").pack(fill="x", padx=8)
+        tk.Label(self.top, text=customer_text, wraplength=430, justify="left",
+                 bg="#f2f2f2").pack(fill="x", padx=8, pady=4)
+        tk.Label(self.top, text="AI 话术(可直接改):", anchor="w").pack(fill="x", padx=8)
+        self.text = scrolledtext.ScrolledText(self.top, height=8)
+        self.text.pack(fill="both", expand=True, padx=8, pady=4)
+        self.text.insert("1.0", draft)
+        bar = tk.Frame(self.top)
+        bar.pack(pady=6)
+        tk.Button(bar, text="发送给客户", width=12,
+                  command=self._send).pack(side="left", padx=6)
+        tk.Button(bar, text="忽略", width=12,
+                  command=self._ignore).pack(side="left", padx=6)
+        self.text.focus_set()
+
+    def _send(self):
+        self.result = "send"
+        self.top.destroy()
+
+    def _ignore(self):
+        self.result = "ignore"
+        self.top.destroy()
 
 
-def build_messages(customer_text):
-    msgs = [{"role": "system", "content": CONFIG["system_prompt"]}]
-    k = int(CONFIG.get("learn_examples", 3) or 0)
-    if k > 0:
-        shown = [e for e in load_examples()[-k:] if e.get("customer") and e.get("reply")]
-        if shown:
-            msgs[0]["content"] += ("\n\n下面是你(店主)过去的真实回复,"
-                                   "请模仿其语气、用词和简洁程度,不要改变业务口径:")
-            for e in shown:
-                msgs.append({"role": "user", "content": e["customer"]})
-                msgs.append({"role": "assistant", "content": e["reply"]})
-    msgs.append({"role": "user", "content": customer_text})
-    return msgs
+# ---------- 主控 ----------
 
-
-def get_ai_reply(messages):
-    import requests
-    url = CONFIG["llm_base_url"].rstrip("/") + "/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {CONFIG['llm_api_key']}",
-        "Content-Type": "application/json",
-    }
-    payload = {"model": CONFIG["llm_model"], "messages": messages, "temperature": 0.7}
-    r = requests.post(url, headers=headers, json=payload, timeout=60)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"].strip()
-
-
-def log_send(customer_msg, final_text, action):
-    path = _os.path.join(_base_dir(), "replies.log")
-    record = {
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "customer": customer_msg,
-        "reply": final_text,
-        "action": action,
-    }
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(_json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def title_matches(title):
-    title = (title or "").strip()
-    if not title:
-        return False
-    return any(s in title or title in s for s in CONFIG["service_chats"])
-
-
-# ---------------- 控制窗口 ----------------
-import tkinter as tk
-from tkinter import messagebox
-
-
-class Controller:
-    QUEUE_CAP = 20
-
+class ControlUI:
     def __init__(self):
+        self.running = True
         self.paused = False
-        self.busy = False
-        self.queue = []
+        self.busy = False          # 确认窗开着时为 True,防止重入;监听不停
+        self.ocr = None
+        self.msg_queue = queue_mod.Queue()
+        self._pending_status = "启动中…"
         self.last_customer = []
         self.last_me = []
-        self.last_trigger = 0
+        self._migrated = False
 
         self.root = tk.Tk()
-        self.root.title("客服 RPA 控制")
-        self.root.geometry("300x190")
+        self.root.title("客服助手")
+        self.root.geometry("300x210")
         self.root.attributes("-topmost", True)
+        self.status_var = tk.StringVar(value="启动中…")
+        tk.Label(self.root, textvariable=self.status_var, wraplength=280,
+                 justify="left").pack(pady=8)
+        self.learn_var = tk.StringVar(value="已学习 0 条")
+        tk.Label(self.root, textvariable=self.learn_var).pack()
+        row = tk.Frame(self.root)
+        row.pack(pady=10)
+        self.pause_btn = tk.Button(row, text="暂停", width=10,
+                                   command=self.toggle_pause)
+        self.pause_btn.pack(side="left", padx=5)
+        tk.Button(row, text="退出", width=10,
+                  command=self.stop).pack(side="left", padx=5)
+        self.root.protocol("WM_DELETE_WINDOW", self.stop)
 
-        self.status_var = tk.StringVar(value="状态: 运行中")
-        tk.Label(self.root, textvariable=self.status_var, anchor="w").pack(fill="x", padx=12, pady=(12, 4))
-        self.queue_var = tk.StringVar(value="待处理: 0 条")
-        tk.Label(self.root, textvariable=self.queue_var, anchor="w").pack(fill="x", padx=12, pady=2)
-        self.learn_var = tk.StringVar(value="已学习你的回复: 0 条")
-        tk.Label(self.root, textvariable=self.learn_var, anchor="w", fg="gray").pack(fill="x", padx=12, pady=2)
+        self.worker = threading.Thread(target=self._watch, daemon=True)
+        self.worker.start()
+        self.root.after(1500, self.tick)
 
-        btns = tk.Frame(self.root)
-        btns.pack(pady=8)
-        self.pause_btn = tk.Button(btns, text="暂停", width=10, command=self.toggle_pause)
-        self.pause_btn.pack(side="left", padx=6)
-        tk.Button(btns, text="退出", width=10, command=self.root.destroy).pack(side="left", padx=6)
+    # ----- 后台监听线程:只做截图/OCR/差分/排队,不碰 tkinter -----
+    def _watch(self):
+        if PaddleOCR is None:
+            self._pending_status = "缺 paddleocr,看不了字"
+            return
+        try:
+            self.ocr = _init_ocr()
+        except Exception as e:
+            self._pending_status = f"OCR 初始化失败:{str(e)[:60]}"
+            return
+        while self.running:
+            try:
+                if not self.paused:
+                    self._scan()
+            except Exception as e:
+                self._pending_status = f"监听出错:{str(e)[:60]}"
+            time.sleep(CONFIG["poll_interval"])
 
-        tk.Label(self.root, text="急停:鼠标甩到屏幕左上角", fg="gray").pack(pady=2)
+    def _scan(self):
+        hwnd = find_wecom_window()
+        if not hwnd:
+            self._pending_status = "没找到企业微信窗口"
+            return
+        if is_minimized(hwnd):
+            self._pending_status = "窗口最小化了,点开再继续"
+            return
+        wx, wy, _, _ = get_window_rect(hwnd)
+
+        chat_rel = resolve_region(CONFIG.get("chat_region_rel"),
+                                  CONFIG.get("chat_region"), wx, wy)
+        title_rel = resolve_region(CONFIG.get("title_region_rel"),
+                                   CONFIG.get("title_region"), wx, wy)
+        if not chat_rel or not title_rel:
+            self._pending_status = "没量聊天区/标题区,先跑 calibrate.py"
+            return
+        if CONFIG.get("chat_region_rel") is None and CONFIG.get("chat_region"):
+            self._migrated = True  # 旧版绝对坐标,按当前窗口换算着用
+
+        img = capture_window(hwnd)
+        if img is None:
+            self._pending_status = "截图失败"
+            return
+        title_img = img.crop(tuple(map(int, title_rel)))
+        chat_img = img.crop(tuple(map(int, chat_rel)))
+
+        title = "".join(t for t, _ in ocr_lines(title_img, self.ocr)).strip()
+        # 学习门禁:只有客服会话才学你的话术;看和回对所有会话生效
+        is_service = bool(CONFIG["service_chats"]) and title_matches(
+            title, CONFIG["service_chats"])
+
+        customer, me = split_sides(ocr_lines(chat_img, self.ocr), chat_img.width)
+        prev_c = self.last_customer
+        new_c = diff_lines(self.last_customer, customer)
+        new_m = diff_lines(self.last_me, me)
+        self.last_customer, self.last_me = customer, me
+
+        if is_service and new_m:
+            ctx = new_c[-1] if new_c else (prev_c[-1] if prev_c else "")
+            append_example(DATA_DIR, ctx, "\n".join(new_m))
+
+        ctx_hist = "\n".join(prev_c[-4:])
+        for m in new_c:
+            self.msg_queue.put({"text": m, "ctx": ctx_hist,
+                                "is_service": is_service,
+                                "title": title or "未知会话"})
+        nq = self.msg_queue.qsize()
+        tag = "·学" if is_service else ""
+        mig = "·旧坐标已换算" if self._migrated else ""
+        self._pending_status = (
+            f"看着[{title or '未知会话'}]{tag}{mig}"
+            + (f"·{nq}条排队" if nq else ""))
+
+    # ----- 主线程:状态刷新 + 逐条处理队列 -----
+    def tick(self):
+        if not self.running:
+            return
+        if self._pending_status:
+            self.set_status(self._pending_status)
+            self._pending_status = None
         self.refresh_learn_count()
+        if not self.paused and not self.busy:
+            try:
+                item = self.msg_queue.get_nowait()
+            except queue_mod.Empty:
+                item = None
+            if item:
+                self.handle_one(item)
+        self.root.after(1500, self.tick)
 
-    def refresh_learn_count(self):
-        self.learn_var.set(f"已学习你的回复: {len(load_examples())} 条")
+    def handle_one(self, item):
+        text = item["text"]
+        self.busy = True
+        try:
+            self.set_status("想话术中…")
+            draft = gen_reply(text, item["ctx"])
+            if draft is None:
+                log_reply(DATA_DIR, item["title"], text,
+                          "(key 没填或网络不通,没生成)", "跳过")
+                self.set_status("key 没填或网络不通,跳过这条")
+                return
+            win = ConfirmWin(self.root, item["title"], text, draft)
+            self.root.wait_window(win.top)  # 你确认期间,后台照样抓新消息排队
+            final = win.text.get("1.0", tk.END).strip()
+            if win.result == "send" and final:
+                ok = self.send_text(final)
+                log_reply(DATA_DIR, item["title"], text, final,
+                          "发送" if ok else "发送失败")
+                self.set_status("已发送" if ok else "发送失败,看看输入框位置")
+            else:
+                log_reply(DATA_DIR, item["title"], text, draft, "忽略")
+                self.set_status("已忽略")
+        finally:
+            self.busy = False
+
+    def send_text(self, text):
+        """点输入框 -> 剪贴板粘贴(中文不乱码) -> 回车。发送时重找窗口,挪过也照发。"""
+        if not IS_WINDOWS or pyautogui is None:
+            return False
+        hwnd = find_wecom_window()
+        if not hwnd or not CONFIG.get("input_rel"):
+            return False
+        try:
+            wx, wy, _, _ = get_window_rect(hwnd)
+            ix, iy = CONFIG["input_rel"]
+            pyautogui.click(wx + ix, wy + iy)
+            time.sleep(0.4)
+            try:
+                import pyperclip
+                pyperclip.copy(text)
+                pyautogui.hotkey("ctrl", "v")
+            except Exception:
+                pyautogui.typewrite(text, interval=0.02)  # 兜底:中文可能打不出
+            time.sleep(0.3)
+            pyautogui.press("enter")
+            return True
+        except Exception:
+            return False
 
     def set_status(self, s):
-        self.status_var.set("状态: " + s)
-        self.queue_var.set(f"待处理: {len(self.queue)} 条")
+        self.status_var.set(s)
+
+    def refresh_learn_count(self):
+        self.learn_var.set(f"已学习 {len(load_examples(DATA_DIR, 100000))} 条")
 
     def toggle_pause(self):
         self.paused = not self.paused
         self.pause_btn.config(text="恢复" if self.paused else "暂停")
-        self.set_status("已暂停(你自己回)" if self.paused else "运行中")
+        self.set_status("已暂停" if self.paused else "运行中")
 
-    def confirm_dialog(self, customer_msg, draft):
-        decision = {"send": False, "text": ""}
-        dlg = tk.Toplevel(self.root)
-        dlg.title("客服 AI 话术确认")
-        dlg.geometry("520x440")
-        dlg.attributes("-topmost", True)
-
-        tk.Label(dlg, text="客户消息:", anchor="w").pack(fill="x", padx=10, pady=(10, 0))
-        t1 = tk.Text(dlg, height=6, wrap="word")
-        t1.pack(fill="x", padx=10)
-        t1.insert("1.0", customer_msg)
-        t1.config(state="disabled")
-
-        tk.Label(dlg, text="AI 话术(可直接改):", anchor="w").pack(fill="x", padx=10, pady=(10, 0))
-        t2 = tk.Text(dlg, height=8, wrap="word")
-        t2.pack(fill="x", padx=10)
-        t2.insert("1.0", draft)
-
-        def on_send():
-            decision["send"] = True
-            decision["text"] = t2.get("1.0", "end").strip()
-            dlg.destroy()
-
-        btns = tk.Frame(dlg)
-        btns.pack(pady=12)
-        tk.Button(btns, text="发送给客户", width=14, bg="#07c160", fg="white",
-                  command=on_send).pack(side="left", padx=10)
-        tk.Button(btns, text="忽略", width=14, command=dlg.destroy).pack(side="left", padx=10)
-
-        dlg.grab_set()
-        self.root.wait_window(dlg)
-        return decision["send"], decision["text"]
-
-    def auto_send(self, text, wx, wy):
-        import platform
-        import pyperclip
-
-        pyperclip.copy(text)
-        ib = CONFIG["input_box"]
-        if _IS_WIN and CONFIG.get("window_rect") and wx is not None:
-            x, y = wx + ib[0], wy + ib[1]
-        else:
-            x, y = ib
-        pyautogui.click(x, y)
-        time.sleep(0.4)
-        mod = "command" if platform.system() == "Darwin" else "ctrl"
-        pyautogui.hotkey(mod, "v")
-        time.sleep(0.3)
-        pyautogui.press("enter")
-
-    def handle_one(self, customer_msg, wx, wy):
-        self.busy = True
-        self.set_status("正在生成话术…")
+    def stop(self):
+        self.running = False
         try:
-            draft = get_ai_reply(build_messages(customer_msg))
-        except Exception as e:
-            messagebox.showerror("AI 调用失败", f"{e}\n\n请检查 config.json 里的 key/base_url/model。")
-            self.set_status("运行中")
-            self.busy = False
-            return
-        send, final = self.confirm_dialog(customer_msg, draft)
-        if send and final:
-            self.auto_send(final, wx, wy)
-            log_send(customer_msg, final, "sent")
-            self.set_status("已发送")
-        else:
-            log_send(customer_msg, draft, "ignored")
-            self.set_status("已忽略")
-        self.refresh_learn_count()
-        self.busy = False
-
-    def poll(self):
-        try:
-            if not self.paused and not self.busy:
-                wx = wy = None
-                if _IS_WIN:
-                    w = find_wecom_window()
-                    if w is None:
-                        self.set_status("未找到企业微信窗口")
-                        return
-                    if w == "minimized":
-                        self.set_status("窗口已最小化,检测暂停")
-                        return
-                    hwnd, (wx, wy, wr, wb) = w
-                    try:
-                        img = capture_window(hwnd)
-                    except Exception as e:
-                        self.set_status(f"截图失败: {e}")
-                        return
-                    title_img = crop_relative(img, wx, wy, wr - wx, wb - wy, CONFIG["title_region"])
-                    chat_img = crop_relative(img, wx, wy, wr - wx, wb - wy, CONFIG["chat_region"])
-                else:
-                    # Mac:退化为固定区域截图
-                    title_img = pyautogui.screenshot(region=CONFIG["title_region"])
-                    chat_img = pyautogui.screenshot(region=CONFIG["chat_region"])
-
-                title = "".join(t for t, _ in ocr_lines(title_img)).strip()
-                # 门禁只管"学":只有客服会话才学习你的话术风格;
-                # 看消息和生成话术对所有会话都生效。
-                is_service = bool(CONFIG["service_chats"]) and title_matches(title)
-
-                lines = ocr_lines(chat_img)
-                customer, me = split_sides(lines, chat_img.width)
-
-                # 学习:你新回的话记下来(只在客服会话里,私人聊天不记)
-                new_m = [l for l in me if l not in self.last_me]
-                new_c = [l for l in customer if l not in self.last_customer]
-                if is_service and new_m:
-                    ctx = new_c[-1] if new_c else (self.last_customer[-1] if self.last_customer else "")
-                    append_example(ctx, "\n".join(new_m))
-                    self.refresh_learn_count()
-
-                now = time.time()
-                if new_c and now - self.last_trigger > 20:
-                    self.last_trigger = now
-                    if len(self.queue) >= self.QUEUE_CAP:
-                        self.queue.pop(0)
-                    self.queue.append("\n".join(new_c))
-
-                self.last_customer, self.last_me = customer, me
-
-                if self.queue:
-                    self.handle_one(self.queue.pop(0), wx, wy)
-                else:
-                    tag = "·学" if is_service else ""
-                    self.set_status(f"运行中[{title or '未知会话'}]{tag}")
+            self.root.destroy()
         except Exception:
-            traceback.print_exc()
-        finally:
-            self.root.after(CONFIG["interval"] * 1000, self.poll)
+            pass
+
+    def run(self):
+        self.root.mainloop()
 
 
 def main():
-    if CONFIG["llm_api_key"].strip() in ("", "填你的key"):
-        r = tk.Tk()
-        r.withdraw()
-        messagebox.showerror("还没填 key", "config.json 里 llm_api_key 还是空的。\n先填上你的 key 再运行。")
-        r.destroy()
-        return
-
-    pyautogui.FAILSAFE = True
-    print("RPA 启动。要求:企业微信登录好、电脑不锁屏(最小化会自动暂停)。")
-    print("控制窗口可随时 暂停/恢复/退出;急停:鼠标甩到屏幕左上角。")
-
-    app = Controller()
-    app.root.after(1000, app.poll)
-    app.root.mainloop()
+    key = CONFIG.get("zhipu_key", "").strip()
+    if IS_WINDOWS and not key:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showwarning(
+            "先填 key",
+            "config.json 里的 zhipu_key 还是空的。\n"
+            "填上你自己的 key 再跑(在自己电脑上填,别发给别人)。\n"
+            "可以先点确定看看界面,但不会真的生成话术。")
+        root.destroy()
+    ui = ControlUI()
+    ui.run()
 
 
 if __name__ == "__main__":
