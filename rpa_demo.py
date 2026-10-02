@@ -107,7 +107,7 @@ def find_wecom_window():
     def cb(hwnd, _):
         try:
             if win32gui.IsWindowVisible(hwnd):
-                cands.append((win32gui.GetWindowTitle(hwnd) or "",
+                cands.append((win32gui.GetWindowText(hwnd) or "",
                               win32gui.GetWindowRect(hwnd), hwnd))
         except Exception:
             pass
