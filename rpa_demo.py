@@ -386,13 +386,18 @@ class ControlUI:
             return
         wx, wy, _, _ = get_window_rect(hwnd)
 
-        chat_rel = resolve_region(CONFIG.get("chat_region_rel"),
+        chat_abs = resolve_region(CONFIG.get("chat_region_rel"),
                                   CONFIG.get("chat_region"), wx, wy)
-        title_rel = resolve_region(CONFIG.get("title_region_rel"),
+        title_abs = resolve_region(CONFIG.get("title_region_rel"),
                                    CONFIG.get("title_region"), wx, wy)
-        if not chat_rel or not title_rel:
+        if not chat_abs or not title_abs:
             self._pending_status = "没量聊天区/标题区,先跑 calibrate.py"
             return
+        # img 是窗口截图,坐标系原点在窗口左上角;把绝对坐标换算成窗口相对再裁
+        chat_rel = [chat_abs[0] - wx, chat_abs[1] - wy,
+                    chat_abs[2] - wx, chat_abs[3] - wy]
+        title_rel = [title_abs[0] - wx, title_abs[1] - wy,
+                     title_abs[2] - wx, title_abs[3] - wy]
         if CONFIG.get("chat_region_rel") is None and CONFIG.get("chat_region"):
             self._migrated = True  # 旧版绝对坐标,按当前窗口换算着用
 
