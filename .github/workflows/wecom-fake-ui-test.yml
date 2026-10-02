@@ -17,9 +17,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wecom-rpa-exe
-          run-id: 36955797816
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: exes
+          run-id: 36958411077
+          github-token: ${{ secrets.GIUB_TOKEN }}
+        
 
       - name: Prepare config (dummy key for cloud test)
         shell: pwsh
