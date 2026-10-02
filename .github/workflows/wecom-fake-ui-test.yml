@@ -18,7 +18,7 @@ jobs:
         with:
           name: wecom-rpa-exe
           run-id: 36958411077
-          github-token: ${{ secrets.GIUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
         
 
       - name: Prepare config (dummy key for cloud test)
