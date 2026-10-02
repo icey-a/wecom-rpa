@@ -17,7 +17,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wecom-rpa-exe
-          run-id: 36970133011
+          run-id: 36972904443
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: exes
 
